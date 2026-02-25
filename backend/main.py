@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
@@ -25,7 +25,8 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# AI config
+# ---------------- AI CONFIG ----------------
+
 USE_AI = os.getenv("USE_AI", "false").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -36,6 +37,8 @@ if USE_AI:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
 
+# ---------------- DB DEP ----------------
+
 def get_db():
     db = SessionLocal()
     try:
@@ -44,8 +47,14 @@ def get_db():
         db.close()
 
 
+# ---------------- PRIORITY ----------------
+
 def calculate_priority(weight: float, due_date: datetime):
     now = datetime.now(timezone.utc)
+
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+
     days_until_due = (due_date - now).days
 
     if days_until_due <= 0:
@@ -89,7 +98,15 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
     return {"access_token": token, "token_type": "bearer"}
 
 
-# ---------------- ASSIGNMENTS (PROTECTED) ----------------
+@app.get("/me")
+def read_current_user(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "email": current_user.email
+    }
+
+
+# ---------------- ASSIGNMENTS ----------------
 
 @app.post("/assignments", response_model=schemas.AssignmentResponse)
 def create_assignment(
@@ -107,6 +124,8 @@ def create_assignment(
         weight=assignment.weight,
         description=assignment.description,
         priority_score=priority,
+        is_completed=False,
+        completed_at=None,
     )
 
     db.add(db_assignment)
@@ -118,18 +137,51 @@ def create_assignment(
 
 @app.get("/assignments", response_model=list[schemas.AssignmentResponse])
 def get_assignments(
+    include_completed: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    return (
-        db.query(models.Assignment)
-        .filter(models.Assignment.user_id == current_user.id)
-        .order_by(models.Assignment.priority_score.desc())
-        .all()
+    query = db.query(models.Assignment).filter(
+        models.Assignment.user_id == current_user.id
     )
 
+    if not include_completed:
+        query = query.filter(models.Assignment.is_completed == False)
 
-# ---------------- UPLOAD SYLLABUS (PROTECTED) ----------------
+    return query.order_by(models.Assignment.priority_score.desc()).all()
+
+
+@app.patch("/assignments/{assignment_id}/toggle")
+def toggle_assignment_completion(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    assignment = db.query(models.Assignment).filter(
+        models.Assignment.id == assignment_id,
+        models.Assignment.user_id == current_user.id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    assignment.is_completed = not assignment.is_completed
+
+    if assignment.is_completed:
+        assignment.completed_at = datetime.now(timezone.utc)
+    else:
+        assignment.completed_at = None
+
+    db.commit()
+    db.refresh(assignment)
+
+    return {
+        "id": assignment.id,
+        "is_completed": assignment.is_completed
+    }
+
+
+# ---------------- SYLLABUS UPLOAD ----------------
 
 @app.post("/upload-syllabus")
 async def upload_syllabus(
@@ -141,7 +193,6 @@ async def upload_syllabus(
     contents = await file.read()
     text = contents.decode("utf-8", errors="ignore")
 
-    # MOCK MODE
     if not USE_AI:
         lines = text.split("\n")
         assignments = []
@@ -158,14 +209,13 @@ async def upload_syllabus(
                     assignments.append({
                         "course_name": course_name,
                         "title": title,
-                        "due_date": datetime.utcnow().isoformat(),
+                        "due_date": datetime.now(timezone.utc).isoformat(),
                         "weight": weight,
                         "description": "Extracted locally (mock mode)"
                     })
                 except:
                     continue
 
-    # AI MODE
     else:
         prompt = f"""
 Extract all assignments from this syllabus.
@@ -200,7 +250,7 @@ Syllabus:
         try:
             due_date = datetime.fromisoformat(item["due_date"])
         except:
-            due_date = datetime.utcnow()
+            due_date = datetime.now(timezone.utc)
 
         priority = calculate_priority(item["weight"], due_date)
 
@@ -212,6 +262,8 @@ Syllabus:
             weight=item["weight"],
             description=item["description"],
             priority_score=priority,
+            is_completed=False,
+            completed_at=None,
         )
 
         if not dry_run:

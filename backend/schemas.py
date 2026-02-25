@@ -28,6 +28,8 @@ class AssignmentResponse(BaseModel):
     weight: float
     description: str
     priority_score: float
+    is_completed: bool
+    completed_at: datetime | None
 
     class Config:
         from_attributes = True

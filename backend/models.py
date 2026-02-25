@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from backend.database import Base
 from datetime import datetime
@@ -27,5 +27,8 @@ class Assignment(Base):
     weight = Column(Float)
     description = Column(String)
     priority_score = Column(Float)
+
+    is_completed = Column(Boolean, default=False)
+    completed_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="assignments")
