@@ -11,7 +11,7 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
+    is_verified = Column(Boolean, default=False)
     assignments = relationship("Assignment", back_populates="user", cascade="all, delete-orphan")
 
 

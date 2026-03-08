@@ -4,11 +4,12 @@ load_dotenv()
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
 
+from jose import jwt
 from openai import OpenAI
 
 from backend.database import SessionLocal, engine
@@ -21,10 +22,17 @@ from backend.auth import (
     get_current_user,
 )
 
-# Initialize database
+# ---------------- CONFIG ----------------
+
+SECRET_KEY = "CHANGE_THIS_LATER"
+ALGORITHM = "HS256"
+
+# ---------------- DATABASE ----------------
+
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +52,6 @@ if USE_AI:
         raise RuntimeError("OPENAI_API_KEY missing in .env")
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-
 # ---------------- DB DEP ----------------
 
 def get_db():
@@ -54,10 +61,17 @@ def get_db():
     finally:
         db.close()
 
+# ---------------- TOKEN ----------------
+
+def create_verification_token(email: str):
+    expire = datetime.utcnow() + timedelta(hours=24)
+    payload = {"sub": email, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 # ---------------- PRIORITY ----------------
 
 def calculate_priority(weight: float, due_date: datetime):
+
     now = datetime.now(timezone.utc)
 
     if due_date.tzinfo is None:
@@ -67,42 +81,76 @@ def calculate_priority(weight: float, due_date: datetime):
 
     if days_until_due <= 0:
         return weight * 10
+
     return weight * (1 / days_until_due)
 
+# ---------------- ROOT ----------------
 
 @app.get("/")
 def read_root():
     return {"status": "Backend operational"}
 
-
 # ---------------- AUTH ----------------
 
 @app.post("/auth/register")
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+
     existing = db.query(models.User).filter(models.User.email == user.email).first()
+
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     new_user = models.User(
         email=user.email,
         hashed_password=hash_password(user.password),
+        is_verified=False
     )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    token = create_access_token(subject=new_user.email)
-    return {"access_token": token, "token_type": "bearer"}
+    token = create_verification_token(new_user.email)
+
+    print("\nVerification link:")
+    print(f"https://classsync-api-jx3k.onrender.com/auth/verify/{token}")
+    
+    return {"message": "Account created. Verify your email first."}
+
+
+@app.get("/auth/verify/{token}")
+def verify_email(token: str, db: Session = Depends(get_db)):
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+    except:
+        raise HTTPException(status_code=400, detail="Invalid verification token")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_verified = True
+    db.commit()
+
+    return {"message": "Email verified successfully"}
 
 
 @app.post("/auth/login", response_model=schemas.Token)
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+
     user = db.query(models.User).filter(models.User.email == form.username).first()
+
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email first")
+
     token = create_access_token(subject=user.email)
+
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -113,7 +161,6 @@ def read_current_user(current_user: models.User = Depends(get_current_user)):
         "email": current_user.email
     }
 
-
 # ---------------- ASSIGNMENTS ----------------
 
 @app.post("/assignments", response_model=schemas.AssignmentResponse)
@@ -122,6 +169,7 @@ def create_assignment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+
     priority = calculate_priority(assignment.weight, assignment.due_date)
 
     db_assignment = models.Assignment(
@@ -149,6 +197,7 @@ def get_assignments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+
     query = db.query(models.Assignment).filter(
         models.Assignment.user_id == current_user.id
     )
@@ -165,6 +214,7 @@ def toggle_assignment_completion(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+
     assignment = db.query(models.Assignment).filter(
         models.Assignment.id == assignment_id,
         models.Assignment.user_id == current_user.id
@@ -188,7 +238,6 @@ def toggle_assignment_completion(
         "is_completed": assignment.is_completed
     }
 
-
 # ---------------- SYLLABUS UPLOAD ----------------
 
 @app.post("/upload-syllabus")
@@ -198,19 +247,25 @@ async def upload_syllabus(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+
     contents = await file.read()
     text = contents.decode("utf-8", errors="ignore")
 
     if not USE_AI:
+
         lines = text.split("\n")
         assignments = []
 
         course_name = lines[0].strip() if lines else "Unknown Course"
 
         for line in lines:
+
             if "-" in line and "%" in line:
+
                 try:
+
                     parts = line.split("-")
+
                     title = parts[0].strip()
                     weight = float(parts[-1].replace("%", "").strip())
 
@@ -219,25 +274,18 @@ async def upload_syllabus(
                         "title": title,
                         "due_date": datetime.now(timezone.utc).isoformat(),
                         "weight": weight,
-                        "description": "Extracted locally (mock mode)"
+                        "description": "Extracted locally"
                     })
+
                 except:
                     continue
 
     else:
+
         prompt = f"""
 Extract all assignments from this syllabus.
-Return ONLY valid JSON list in this format:
 
-[
-  {{
-    "course_name": "string",
-    "title": "string",
-    "due_date": "YYYY-MM-DDTHH:MM:SS",
-    "weight": number,
-    "description": "string"
-  }}
-]
+Return ONLY valid JSON list.
 
 Syllabus:
 {text}
@@ -255,6 +303,7 @@ Syllabus:
     created = []
 
     for item in assignments:
+
         try:
             due_date = datetime.fromisoformat(item["due_date"])
         except:

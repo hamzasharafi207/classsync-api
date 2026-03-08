@@ -77,3 +77,14 @@ def get_current_user(
     if not user:
         raise cred_exc
     return user
+
+from jose import jwt
+from datetime import datetime, timedelta
+
+SECRET_KEY = "CHANGE_THIS_LATER"
+ALGORITHM = "HS256"
+
+def create_verification_token(email: str):
+    expire = datetime.utcnow() + timedelta(hours=24)
+    payload = {"sub": email, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
